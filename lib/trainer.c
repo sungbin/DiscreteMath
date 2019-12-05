@@ -1,11 +1,17 @@
+//TODO: when remove duplicate, size doesnt change
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <glib.h>
-#include <math.h>
 #include "trainer.h"
+#include "../include/libstemmer.h"
 
-GHashTable* model;
+#define MAX_W 100
+#define MIN_W 10
+#define DUMMY_W 10
 
 GHashTable * neg_set;
 GHashTable * non_neg_set;
@@ -13,7 +19,26 @@ GHashTable * non_neg_set;
 int neg_size;
 int non_neg_size;
 
+struct sb_stemmer * stemmer ;
+
+const char out_csv[50] = "model.csv";
+FILE* f;
+
+GHashTable* checked;
+
+FILE* f_del; //TODO: remove
+FILE* f_stay; //TODO: remove
+
+
 int main() {
+
+	f = fopen(out_csv, "w");
+
+	f_del = fopen("deleted.csv", "w"); //TODO: remove
+	f_stay = fopen("stay.csv", "w"); //TODO: remove
+
+
+	stemmer = sb_stemmer_new("english", 0x0) ;
 
 	neg_set = g_hash_table_new(g_str_hash, g_str_equal);
 	non_neg_set = g_hash_table_new(g_str_hash, g_str_equal);
@@ -21,21 +46,23 @@ int main() {
 	neg_size = read_file_to_set(neg_set,"../data/train.negative.csv");
 	non_neg_size = read_file_to_set(non_neg_set,"../data/train.non-negative.csv");
 
-	printf("neg: %d, non-neg: %d\n",neg_size,non_neg_size);
+	//printf("neg: %d, non-neg: %d\n",neg_size,non_neg_size);
 
-	model = g_hash_table_new(g_str_hash, g_str_equal);	
+	checked = g_hash_table_new(g_str_hash, g_str_equal);	
+	make_model();
 
-	rescaling(neg_set,non_neg_set,neg_size,non_neg_size);
+	sb_stemmer_delete(stemmer) ;
+	fclose(f);
+
+	fclose(f_del); //TODO: remove
+	fclose(f_stay); //TODO: remove
 
 	return 0;
 }
 
 int read_file_to_set(GHashTable * counter,char* file) {
 
-	//FILE * f = fopen("../data/train.negative.csv", "r") ;
 	FILE * f = fopen(file, "r") ;
-
-        //GHashTable * counter = g_hash_table_new(g_str_hash, g_str_equal) ;
 
         char * line = 0x0 ;
         size_t r ;
@@ -65,14 +92,21 @@ int add_line_to_set(GHashTable* set, char line[],int size) {
 
 		for (t = strtok(line, dili) ; t != 0x0 ; t = strtok(0x0, dili)) {
 
-			//printf("t: %s\n",t);
+			for(int i = 0; i < strlen(t); i++) {
+				if(t[i] >= 'A' && t[i] <= 'Z') {
+					t[i] = t[i] - 'A' + 'a';
+				}
+			}
 
 			int * d ;			
 			d = g_hash_table_lookup(set, t) ;
 			if (d == NULL) {
 				d = malloc(sizeof(int)) ;
 				*d = 1 ;
-				g_hash_table_insert(set, strdup(t), d) ;
+				
+				const char* stem = sb_stemmer_stem(stemmer, strdup(t), strlen(t)) ;
+
+				g_hash_table_insert(set, strdup(stem), d) ;
 			}
 			else {
 				*d = *d + 1 ;
@@ -83,42 +117,22 @@ int add_line_to_set(GHashTable* set, char line[],int size) {
 		return size;
 }
 
-void reduce_dictionary(GHashTable* set) {
-
-}
-
-void stemming(GHashTable* set) {
-
-}
-
-void smoothing(GHashTable* set) {
-
-}
-
-void rescaling() {
+void make_model() {
 
 	g_hash_table_foreach(neg_set, m1_for, 0x0);
 	g_hash_table_foreach(non_neg_set, m2_for, 0x0);
-
-//	g_hash_table_foreach(model, model_for, 0x0);
 }
 
-// new_set: model
-/*
-GHashTable * neg_set;
-GHashTable * non_neg_set;
-
-int neg_size;
-int non_neg_size;
-*/
 void m1_for (gpointer key, gpointer value, gpointer userdata) 
 {
 	char * word = key ;
 	int * n = value ;
 
-	int * d = g_hash_table_lookup(model,word) ;
+	int * d = g_hash_table_lookup(checked,word) ;
 	if(d == NULL) {
 		
+		g_hash_table_insert(checked, strdup(word), 0x0) ;
+
 		double p1,p2;
 		
 		int n2;
@@ -126,12 +140,15 @@ void m1_for (gpointer key, gpointer value, gpointer userdata)
 		if(d2 == NULL) n2 = 0;
 		else n2 = *d2;
 
-		p1 = (double) *n / (double) neg_size;
-		p2 = (double) n2 / (double) non_neg_size;
+		int freq = *n + n2;
 
-		printf("%s, %lf, %lf\n",word,p1,p2);
 
-		g_hash_table_insert(model, strdup(word), 0x0) ;
+		if(!valid_range(word,freq)) return;
+
+		p1 = (double) (*n + DUMMY_W) / (double) neg_size;
+		p2 = (double) (n2 + DUMMY_W) / (double) non_neg_size;
+
+		fprintf(f,"%s, %lf, %lf\n",word,p1,p2);
 			
 	} else {
 		return;
@@ -142,7 +159,7 @@ void m2_for (gpointer key, gpointer value, gpointer userdata)
         char * word = key ;
         int * n = value ;
 
-        int * d = g_hash_table_lookup(model,word) ;
+        int * d = g_hash_table_lookup(checked,word) ;
         if(d == NULL) {
 
                 double p1,p2;
@@ -152,22 +169,31 @@ void m2_for (gpointer key, gpointer value, gpointer userdata)
                 if(d2 == NULL) n2 = 0;
                 else n2 = *d2;
 
-		p1 = (double) *n / (double) non_neg_size;
-		p2 = (double) n2 / (double) neg_size;
+		int freq = *n + n2;
 
-		printf("%s, %lf, %lf\n",word,p2,p1);
+		if(!valid_range(word,freq)) return;
 
-                g_hash_table_insert(model, strdup(word), 0x0) ;
+		p1 = (double) (*n + DUMMY_W) / (double) non_neg_size;
+		p2 = (double) (n2 + DUMMY_W) / (double) neg_size;
+
+		fprintf(f,"%s, %lf, %lf\n",word,p2,p1);
+
+                g_hash_table_insert(checked, strdup(word), 0x0) ;
 
         } else {
                 return;
         }
 }
+bool valid_range(char* word, int freq) {
+	//return freq >= MIN_W && freq <= MAX_W; //TODO: uncomment
 
-void model_for (gpointer key, gpointer value, gpointer userdata) {
-
-}
-
-void make_model(GHashTable* set) {
+	/* TODO: remove below */
+	if(freq >= MIN_W && freq <= MAX_W) {
+		fprintf(f_stay,"%s, %d\n",word,freq);
+		return true;		
+	} else {
+		fprintf(f_del,"%s, %d\n",word,freq);
+		return false;
+	}
 
 }
